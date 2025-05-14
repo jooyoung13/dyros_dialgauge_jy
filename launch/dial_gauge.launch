@@ -1,0 +1,27 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="port"        default="/dev/ttyUSB0"         doc="Serial port device" />
+  <arg name="baud"        default="2400"                doc="Serial baudrate" />
+  <arg name="export_path" default="/tmp/dial_data.txt"  doc="Path to export recorded data" />
+
+  <!-- Serial communication node -->
+  <node name="serial_node" pkg="dyros_dialgauge_jy" type="serial_node" output="screen">
+    <!-- private parameters -->
+    <param name="port"  value="$(arg port)" />
+    <param name="baud"  value="$(arg baud)" />
+  </node>
+
+  <!-- Recorder node -->
+  <node name="recorder_node" pkg="dyros_dialgauge_jy" type="recorder_node" output="screen">
+    <!-- private parameter -->
+    <param name="export_path" value="$(arg export_path)" />
+  </node>
+
+  <!-- GUI node -->
+  <node pkg="dyros_dialgauge_jy"
+      type="gui_node"
+      name="gui_node"
+      required="true"
+      output="screen" />
+
+</launch>
