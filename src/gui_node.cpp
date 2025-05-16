@@ -190,6 +190,7 @@ public:
     start_client_  = nh_.serviceClient<std_srvs::Trigger>   ("/serial_node/start");
     stop_client_   = nh_.serviceClient<std_srvs::Trigger>   ("/serial_node/stop");
     export_client_ = nh_.serviceClient<std_srvs::Trigger>   ("/recorder_node/export");
+    reset_client_  = nh_.serviceClient<std_srvs::Trigger>  ("/recorder_node/reset"); 
 
     // --- ROS 구독 ---
     sub_ = nh_.subscribe("/dial_gauge/raw", 1000, &GuiNode::onData, this);
@@ -203,7 +204,7 @@ public:
     // --- 타이머: ROS 콜백 처리 및 차트 슬라이딩 윈도우 갱신 ---
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &GuiNode::onTimer);
-    timer_->start(100);
+    timer_->start(5);
 
     // --- 시스템 트레이 아이콘 설정 추가 ---
     // 1) 패키지 경로에서 아이콘 파일 위치 구하기
@@ -237,56 +238,91 @@ public:
 
 private slots:
     void onOpen() {
-    std_srvs::SetBool srv;
-    // 1) 포트가 열려 있으면 닫기, 아니면 열기
-    bool currentlyOpen = (btn_open_->text() == "Port Opened");
-    srv.request.data = !currentlyOpen;
+        std_srvs::SetBool srv;
 
-    if (open_client_.call(srv)) {
-        if (srv.response.success) {
-        // 토글된 상태에 맞춰 버튼 레이블 업데이트
-        btn_open_->setText(currentlyOpen ? "Open Port" : "Port Opened");
+        /* 현재 버튼 글자 기준으로 열림 여부 판단 */
+        bool currentlyOpen = (btn_open_->text() == "Port Opened");
+        srv.request.data   = !currentlyOpen;      // true → 열기, false → 닫기
 
-        btn_open_->setStyleSheet(                                // ★ 추가
-                currentlyOpen ? ""                                   // 포트 닫힘 → 기본색
-                              : "background:#28a745;color:white;"    // 포트 열림 → 초록
-            );                                                       // ★ 여기까지
+        /* 서비스 호출 */
+        if (open_client_.call(srv)) {
+            if (srv.response.success) {
+                /* ───────────── 성공 ───────────── */
+                btn_open_->setText(currentlyOpen ? "Open Port" : "Port Opened");
+
+                /* 열렸을 때만 초록, 닫히면 기본색 */
+                btn_open_->setStyleSheet(
+                    currentlyOpen ? ""                          // 닫힘 = 기본
+                                  : "background:#28a745;color:white;"   // 열림 = 초록
+                );
+            } else {
+                /* ───────── 서비스 응답 실패 ───────── */
+                btn_open_->setText("Error");
+                btn_open_->setStyleSheet("background:#d9534f;color:white;");  // 빨강
+
+                /* 1.5 초 뒤 원상 복구 */
+                QTimer::singleShot(1500, this, [this]{
+                    btn_open_->setStyleSheet("");
+                    btn_open_->setText("Open Port");
+                });
+
+                ROS_WARN("openPort failed: %s", srv.response.message.c_str());
+            }
         } else {
-        // 에러 메시지 표시
-        btn_open_->setText("Error");
-        ROS_WARN("openPort failed: %s", srv.response.message.c_str());
+            /* ─────── 서비스 호출 자체 실패 ─────── */
+            btn_open_->setText("Service Failed");
+            btn_open_->setStyleSheet("background:#d9534f;color:white;");
+
+            QTimer::singleShot(1500, this, [this]{
+                btn_open_->setStyleSheet("");
+                btn_open_->setText("Open Port");
+            });
+
+            ROS_ERROR("Failed to call /serial_node/open");
         }
-    } else {
-        btn_open_->setText("Service Failed");
-        ROS_ERROR("Failed to call /serial_node/open");
-    }
     }
 
 
-  void onStart() {
-    std_srvs::Trigger srv;
-    if (start_client_.call(srv) && srv.response.success) {
-      // 시간 기준을 리셋하고 기존 데이터를 지웁니다.
-      start_time_ = ros::Time::now();
-      data_.clear();
-      is_publishing_  = true;
 
-      has_prev_sample_ = false;          // ★ 추가
+    void onStart() {
+      // 1) 퍼블리시(시리얼 송수신) 시작 요청
+      std_srvs::Trigger srv_start;
+      if (start_client_.call(srv_start) && srv_start.response.success) {
 
-      btn_start_->setStyleSheet(                                  // ★ 수정
+        // 2) RecorderNode 데이터 초기화 요청 (custom reset 서비스)
+        std_srvs::Trigger srv_reset;
+        if (reset_client_.call(srv_reset) && srv_reset.response.success) {
+          ROS_INFO("Recorder data cleared");
+        } else {
+          ROS_WARN("Failed to reset recorder data");
+        }
+
+        // 3) GUI 내부 상태 초기화
+        start_time_      = ros::Time::now();
+        data_.clear();
+        is_publishing_   = true;
+        has_prev_sample_ = false;    // ★ 추가: 이전 샘플 유무 초기화
+
+        // 4) 버튼 스타일 & 레이블 업데이트
+        btn_start_->setStyleSheet(
           "QPushButton{background:#d9534f;color:white;"
           "border:1px solid #999;border-radius:10px;padding:8px 12px;}"
-          "QPushButton:hover{background:#c9302c;}"   /* 마우스오버 색 */
-      );
-      btn_start_->setText("Measurement is running. Click to stop.");
-      disconnect(btn_start_, &QPushButton::clicked, this, &GuiNode::onStart);
-      connect(btn_start_, &QPushButton::clicked, this, &GuiNode::onStop);
-      btn_open_->setEnabled(false);  
-      ROS_INFO("Publishing started");
-    } else {
-      ROS_ERROR("onStart failed");
+          "QPushButton:hover{background:#c9302c;}"
+        );
+        btn_start_->setText("Measurement is running. Click to stop.");
+
+        // 5) 클릭 시 onStop()이 호출되도록 시그널 토글
+        disconnect(btn_start_, &QPushButton::clicked, this, &GuiNode::onStart);
+        connect(btn_start_,    &QPushButton::clicked, this, &GuiNode::onStop);
+
+        // 6) 포트 열기 버튼 비활성화
+        btn_open_->setEnabled(false);
+
+        ROS_INFO("Publishing started");
+      } else {
+        ROS_ERROR("onStart failed");
+      }
     }
-  }
 
     // 1) onStop(): 퍼블리시만 멈추고, ros::shutdown() 절대 호출 안 함
     void onStop() {
@@ -471,6 +507,8 @@ private:
   QString       export_path_;  // 사용자가 고른 경로
 
   bool is_publishing_ = false;
+
+  ros::ServiceClient reset_client_;  // @@ 추가
 
 };
 

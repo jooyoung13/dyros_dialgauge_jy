@@ -183,8 +183,8 @@ private:
     ROS_INFO("writeLoop started");
     int fd = serial_.native_handle();
     int dtr = TIOCM_DTR;
-    const boost::posix_time::milliseconds dtr_low(10);
-    const boost::posix_time::milliseconds interval(80);
+    const boost::posix_time::milliseconds dtr_low(1);
+    const boost::posix_time::milliseconds interval(1); //measure interval - 5Hz: 80
 
     while (sending_ && ros::ok()) {
       ioctl(fd, TIOCMBIC, &dtr);
